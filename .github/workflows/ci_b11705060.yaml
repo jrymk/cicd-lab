@@ -1,0 +1,159 @@
+name: CI b11705060
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-b11705060-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    name: TypeScript typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run TypeScript typecheck
+        run: npm run typecheck
+
+  prettier:
+    name: Prettier check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Prettier check
+        run: npm run format:check
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Vitest
+        run: |
+          mkdir -p reports
+          npm test -- --reporter=default --reporter=junit --outputFile.junit=reports/vitest-junit.xml
+
+      - name: Publish test summary
+        if: always()
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const reportPath = 'reports/vitest-junit.xml';
+          const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+          const lines = ['## Vitest Test Results', ''];
+
+          function decodeXml(value) {
+            return String(value ?? '')
+              .replace(/&quot;/g, '"')
+              .replace(/&apos;/g, "'")
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&amp;/g, '&');
+          }
+
+          function readAttrs(tag) {
+            return Object.fromEntries(
+              [...String(tag ?? '').matchAll(/\s([\w:-]+)="([^"]*)"/g)].map((match) => [
+                match[1],
+                decodeXml(match[2])
+              ])
+            );
+          }
+
+          function escapeMarkdown(value) {
+            return String(value ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
+          }
+
+          if (!fs.existsSync(reportPath)) {
+            lines.push('No JUnit test report was generated.');
+          } else {
+            const xml = fs.readFileSync(reportPath, 'utf8');
+            const summaryTag =
+              xml.match(/<testsuites\b[^>]*>/)?.[0] ?? xml.match(/<testsuite\b[^>]*>/)?.[0];
+            const totals = readAttrs(summaryTag);
+            const cases = [...xml.matchAll(/<testcase\b([^>]*)>([\s\S]*?)<\/testcase>/g)].map(
+              (match) => ({
+                attrs: readAttrs(match[1]),
+                body: match[2]
+              })
+            );
+            const failedCases = cases.filter(
+              (testCase) => testCase.body.includes('<failure') || testCase.body.includes('<error')
+            );
+
+            lines.push('| Total | Failed | Errors | Skipped | Duration |');
+            lines.push('| ---: | ---: | ---: | ---: | ---: |');
+            lines.push(
+              `| ${totals.tests ?? 0} | ${totals.failures ?? 0} | ${totals.errors ?? 0} | ${totals.skipped ?? 0} | ${totals.time ?? 0}s |`
+            );
+            lines.push('');
+
+            if (failedCases.length === 0) {
+              lines.push('All Vitest test cases passed.');
+            } else {
+              lines.push('### Failed Cases', '');
+              lines.push('| Class | Test | Message |');
+              lines.push('| --- | --- | --- |');
+              for (const testCase of failedCases) {
+                const message =
+                  testCase.body.match(/<(failure|error)\b[^>]*message="([^"]*)"/)?.[2] ??
+                  'No failure message was provided.';
+                lines.push(
+                  `| ${escapeMarkdown(testCase.attrs.classname)} | ${escapeMarkdown(testCase.attrs.name)} | ${escapeMarkdown(decodeXml(message))} |`
+                );
+              }
+            }
+          }
+
+          fs.appendFileSync(summaryPath, `${lines.join('\n')}\n`);
+          NODE
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-junit-report
+          path: reports/vitest-junit.xml
+          if-no-files-found: warn
